@@ -1,4 +1,4 @@
-# video sorter
+# dumpman
 
 ```console
 > dumpman -h
