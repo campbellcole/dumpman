@@ -34,7 +34,7 @@ where
 
 pub fn get_media_ids(root: &str) -> Vec<u32> {
     let re = regex!(r#"MVI_(\d{4})\.MOV"#);
-    let path = join(&root.to_string(), &CONTENT_PATH);
+    let path = join(&root.to_string(), CONTENT_PATH);
     let mut file_list = fs::read_dir(path).unwrap().filter_map(|r| {
         let r = r.unwrap();
         if r.file_type().unwrap().is_file() {
@@ -171,7 +171,7 @@ fn main() -> Result<(), anyhow::Error> {
     env_logger::builder().format_timestamp(None).init();
 
     let args = Args::parse();
-    let root_path = join(&args.root, &CONTENT_PATH);
+    let root_path = join(&args.root, CONTENT_PATH);
 
     debug!("Checking root directory");
     if root_path.to_string_lossy().is_empty() || !root_path.exists() {
@@ -224,13 +224,13 @@ fn main() -> Result<(), anyhow::Error> {
         debug!("Processing ops: {}", op.name);
         match op.op_type {
             MapOpType::Group => {
-                let group_out = join(&out_path, &[op.name]);
+                let group_out = join(&out_path, [op.name]);
                 fs::create_dir(&group_out).unwrap();
                 for id in ids.clone() {
                     if id >= op.start && id < op.end {
                         let filename = format!("MVI_{}.MOV", id);
-                        let from = join(&root_path, &[&filename]);
-                        let to = join(&group_out, &[&filename]);
+                        let from = join(&root_path, [&filename]);
+                        let to = join(&group_out, [&filename]);
                         fs::copy(from, to).unwrap();
                     }
                 }
