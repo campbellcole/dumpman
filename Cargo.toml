@@ -1,11 +1,9 @@
 [package]
 name = "dumpman"
-version = "1.0.0-rc"
+version = "1.0.0"
 edition = "2021"
 authors = ["pslightjs"]
-description = "Automagically categorize camera dumps"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+description = "Interactively categorize camera dumps"
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
