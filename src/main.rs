@@ -1,8 +1,9 @@
+use chrono::prelude::*;
 use clap::Parser;
 use lazy_regex::regex;
 use strum::{EnumString, EnumVariantNames, VariantNames};
 use thiserror::Error;
-use std::{fs, path::{PathBuf, Path}, fmt::Display, str::FromStr};
+use std::{fs, path::{PathBuf, Path}, fmt::Display, str::FromStr, time::{SystemTime, UNIX_EPOCH}, ffi::OsString, collections::HashMap};
 use log::{debug, error};
 
 const DEFAULT_ROOT: &str = ".";
@@ -11,12 +12,17 @@ const CONTENT_PATH: [&str; 2] = ["DCIM", "100CANON"];
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 pub struct Args {
-    #[clap(short, long, value_parser, default_value = DEFAULT_ROOT)]
     /// The root directory of the SD card
+    #[clap(short, long, value_parser, default_value = DEFAULT_ROOT)]
     root: String,
+
     /// The output directory to store the generated groups
     #[clap(short, long, value_parser)]
     out: String,
+
+    /// Enable autogrouping
+    #[clap(short, long, action, default_value_t = false)]
+    auto: bool,
 }
 
 #[inline]
@@ -32,20 +38,44 @@ where
     return buf;
 }
 
-pub fn get_media_ids(root: &str) -> Vec<u32> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Media {
+    id: u32,
+    filename: OsString,
+    created_at: SystemTime, // temp
+}
+
+impl PartialOrd for Media {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.id.partial_cmp(&other.id)
+    }
+}
+
+impl Ord for Media {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.id.cmp(&other.id)
+    }
+}
+
+pub fn get_media_ids(root: &str) -> Vec<Media> {
     let re = regex!(r#"MVI_(\d{4})\.MOV"#);
     let path = join(&root.to_string(), CONTENT_PATH);
     let mut file_list = fs::read_dir(path).unwrap().filter_map(|r| {
         let r = r.unwrap();
         if r.file_type().unwrap().is_file() {
-            Some(r.file_name())
+            Some((r.file_name(), r.metadata().unwrap().created().unwrap()))
         } else {
             None
         }
-    }).filter_map(|os| {
-        let caps = re.captures(os.to_str().unwrap());
+    }).filter_map(|file_info| {
+        let filename = file_info.0.clone();
+        let caps = re.captures(filename.to_str().unwrap());
         caps.map(|cap| {
-            cap.get(1).expect("filename does not follow hardcoded pattern. tough luck.").as_str().parse::<u32>().unwrap()
+            Media {
+                id: cap.get(1).expect("filename does not follow hardcoded pattern. tough luck.").as_str().parse::<u32>().unwrap(),
+                filename: filename.clone(),
+                created_at: file_info.1,
+            }
         })
     }).collect::<Vec<_>>();
 
@@ -138,6 +168,26 @@ pub fn input_loop() -> MapOps {
     v
 }
 
+pub fn group_by_day(media: &Vec<Media>) -> MapOps {
+    let v = Vec::new();
+
+    let map = HashMap::<Date<Utc>, (u32, u32)>::new();
+    
+    for m in media {
+        let date: Date<Utc> = Utc.f.created_at.duration_since(UNIX_EPOCH).unwrap().as_millis();
+        match map.get_mut(&m.created_at.duration_since(UNIX_EPOCH).unwrap().as_millis().into()) {
+            Some(mm) => {
+
+            },
+            None => {
+
+            }
+        }
+    }
+
+    v
+}
+
 #[derive(Error, Debug)]
 pub enum Errors {
     InvalidRoot(String, PathBuf),
@@ -193,21 +243,27 @@ fn main() -> Result<(), anyhow::Error> {
     debug!("Output is valid!");
 
     debug!("Parsing filenames");
-    let ids = get_media_ids(&args.root);
-    debug!("Parsed {} video files!", ids.len());
+    let media = get_media_ids(&args.root);
+    debug!("Parsed {} video files!", media.len());
     
-    if ids.len() == 0 {
+    if media.len() == 0 {
         return Err(Errors::NoVideos.into());
     }
 
-    let start = ids.get(0).unwrap();
-    let end = ids.get(ids.len() - 1).unwrap();
+    let start = media.get(0).unwrap().id;
+    let end = media.get(media.len() - 1).unwrap().id;
 
     debug!("Filename range: {} -> {}", start, end);
 
-    println!("\u{00BB} {} videos ({}..{})\n\u{00BB} Available ops: {}", ids.len(), start, end, MapOpType::VARIANTS.join(", "));
+    println!("\u{00BB} {} videos ({}..{})\n\u{00BB} Available ops: {}", media.len(), start, end, MapOpType::VARIANTS.join(", "));
 
-    let ops = input_loop();
+    let ops = {
+        if args.auto {
+            group_by_day(&media)
+        } else {
+            input_loop()
+        }
+    };
 
     debug!("Validating map ops");
     let valid = validate_ops(&ops);
@@ -226,11 +282,10 @@ fn main() -> Result<(), anyhow::Error> {
             MapOpType::Group => {
                 let group_out = join(&out_path, [op.name]);
                 fs::create_dir(&group_out).unwrap();
-                for id in ids.clone() {
-                    if id >= op.start && id < op.end {
-                        let filename = format!("MVI_{}.MOV", id);
-                        let from = join(&root_path, [&filename]);
-                        let to = join(&group_out, [&filename]);
+                for m in media.clone() {
+                    if m.id >= op.start && m.id < op.end {
+                        let from = join(&root_path, [&m.filename]);
+                        let to = join(&group_out, [&m.filename]);
                         fs::copy(from, to).unwrap();
                     }
                 }
