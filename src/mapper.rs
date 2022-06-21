@@ -1,9 +1,17 @@
+use chrono::{Date, TimeZone, Utc};
 use lazy_regex::regex;
-use std::{ffi::OsString, fs, path::PathBuf, time::SystemTime};
-use strum::{EnumString, EnumVariantNames};
+use std::{
+    collections::HashMap,
+    ffi::OsString,
+    fs,
+    path::PathBuf,
+    str::FromStr,
+    time::{SystemTime, UNIX_EPOCH},
+};
+use strum::{EnumString, EnumVariantNames, VariantNames};
 
 use crate::{
-    error::{Errors, Result},
+    error::{Errors, OpValidationResult, Result},
     util,
 };
 
@@ -58,7 +66,7 @@ impl Ord for Media {
 
 impl Mapper {
     pub fn try_new(root: String, out: String) -> Result<Self> {
-        let root_path = util::join(&root, &["DCIM", "100CANON"]);
+        let root_path = util::join(&root, CONTENT_PATH);
         if !root_path.exists() {
             return Err(Errors::InvalidRoot(root, root_path));
         }
@@ -69,7 +77,11 @@ impl Mapper {
         } else {
             match fs::read_dir(&out_path) {
                 Ok(it) => {
-                    if it.count() != 0 {
+                    for f in it {
+                        if f.unwrap().file_name().eq_ignore_ascii_case(".ds_store") {
+                            continue;
+                        }
+
                         return Err(Errors::OutputDirectoryNotEmpty);
                     }
                 }
@@ -119,7 +131,162 @@ impl Mapper {
         }
     }
 
-    pub fn prompt_for_ops() -> Result {
-        
+    pub fn get_range(&self) -> Result<(u32, u32)> {
+        if self.media.len() == 0 {
+            return Ok((0, 0));
+        }
+
+        let start = self.media.get(0).unwrap().id;
+        let end = self.media.get(self.media.len() - 1).unwrap().id;
+
+        Ok((start, end))
+    }
+
+    pub fn len(&self) -> usize {
+        self.media.len()
+    }
+
+    fn validate_ops(&self) -> Result<OpValidationResult> {
+        use OpValidationResult::*;
+
+        if self.ops.len() == 0 {
+            return Ok(Empty);
+        }
+
+        for op1 in self.ops.clone() {
+            for op2 in self.ops.clone() {
+                if op1 == op2 {
+                    continue;
+                }
+
+                if (op1.start > op2.start && op2.end > op1.start)
+                    || (op1.start < op2.start && op1.end > op2.start)
+                {
+                    return Ok(OverlappingRange(op1, op2));
+                }
+            }
+        }
+
+        Ok(Valid)
+    }
+
+    pub fn group_by_day(&mut self) -> Result {
+        let mut v = Vec::<MapOp>::new();
+        let mut map = HashMap::<Date<Utc>, (u32, u32)>::new();
+
+        for m in &self.media {
+            let epoch = m.created_at.duration_since(UNIX_EPOCH).unwrap().as_secs();
+            let date = Utc.timestamp(epoch.try_into().unwrap(), 0).date();
+            match map.get_mut(&date) {
+                Some(bounds) => {
+                    if m.id < bounds.0 {
+                        bounds.0 = m.id;
+                    }
+                    if m.id >= bounds.1 {
+                        bounds.1 = m.id + 1;
+                    }
+                }
+                None => {
+                    map.insert(date, (m.id, m.id + 1));
+                }
+            }
+        }
+
+        println!("Enter a name for the following days.");
+        for (date, bounds) in map {
+            let prompt = format!("{date}: ");
+            let name = rprompt::prompt_reply_stdout(&prompt).unwrap();
+            let name = format!("{name}_{date}");
+            let op_type = {
+                if MapOpType::VARIANTS.len() > 1 {
+                    let type_name = rprompt::prompt_reply_stdout("Enter map operation: ").unwrap();
+                    MapOpType::from_str(&type_name).unwrap()
+                } else {
+                    Default::default()
+                }
+            };
+            v.push(MapOp {
+                end: bounds.1,
+                name,
+                op_type,
+                start: bounds.0,
+            });
+        }
+
+        self.ops.extend(v);
+
+        let valid = self.validate_ops()?;
+
+        match &valid {
+            OpValidationResult::Valid => {}
+            _ => return Err(Errors::ValidationError(valid)),
+        }
+
+        Ok(())
+    }
+
+    pub fn prompt_for_ops(&mut self) -> Result {
+        let mut v = Vec::<MapOp>::new();
+        loop {
+            let name = rprompt::prompt_reply_stdout("Enter group name (empty = done): ").unwrap();
+            if name.is_empty() {
+                break;
+            }
+
+            let op_type = {
+                if MapOpType::VARIANTS.len() > 1 {
+                    let type_name = rprompt::prompt_reply_stdout("Enter map operation: ").unwrap();
+                    MapOpType::from_str(&type_name).unwrap()
+                } else {
+                    Default::default()
+                }
+            };
+
+            let start = rprompt::prompt_reply_stdout("Enter start range (incl.): ")
+                .unwrap()
+                .parse::<u32>()
+                .unwrap();
+            let end = rprompt::prompt_reply_stdout("Enter end range (excl.): ")
+                .unwrap()
+                .parse::<u32>()
+                .unwrap();
+
+            v.push(MapOp {
+                end,
+                name,
+                op_type,
+                start,
+            });
+        }
+
+        self.ops.extend(v);
+
+        let valid = self.validate_ops()?;
+
+        match &valid {
+            OpValidationResult::Valid => {}
+            _ => return Err(Errors::ValidationError(valid)),
+        }
+
+        Ok(())
+    }
+
+    pub fn execute(&mut self) -> Result {
+        for op in &self.ops {
+            match op.op_type {
+                MapOpType::Group => {
+                    let group_out = util::join(&self.out_path, [&op.name]);
+                    fs::create_dir(&group_out).unwrap();
+                    for m in self.media.clone() {
+                        if m.id >= op.start && m.id < op.end {
+                            let from = util::join(&self.root_path, [&m.filename]);
+                            let to = util::join(&group_out, [&m.filename]);
+                            fs::copy(from, to).unwrap();
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }

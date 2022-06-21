@@ -2,7 +2,7 @@
 
 ```console
 > dumpman -h
-dumpman 1.0.0-rc
+dumpman 1.1.0
 pslightjs
 Interactively categorize camera dumps
 
@@ -10,6 +10,7 @@ USAGE:
     dumpman [OPTIONS] --out <OUT>
 
 OPTIONS:
+    -a, --auto           Enable autogrouping
     -h, --help           Print help information
     -o, --out <OUT>      The output directory to store the generated groups
     -r, --root <ROOT>    The root directory of the SD card [default: .]
