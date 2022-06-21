@@ -1,13 +1,26 @@
 use chrono::prelude::*;
 use clap::Parser;
 use lazy_regex::regex;
+use log::{debug, error};
+use std::{
+    collections::HashMap,
+    ffi::OsString,
+    fmt::Display,
+    fs,
+    path::{Path, PathBuf},
+    str::FromStr,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use strum::{EnumString, EnumVariantNames, VariantNames};
 use thiserror::Error;
-use std::{fs, path::{PathBuf, Path}, fmt::Display, str::FromStr, time::{SystemTime, UNIX_EPOCH}, ffi::OsString, collections::HashMap};
-use log::{debug, error};
+
+use crate::mapper::Mapper;
 
 const DEFAULT_ROOT: &str = ".";
-const CONTENT_PATH: [&str; 2] = ["DCIM", "100CANON"];
+
+pub mod error;
+pub mod mapper;
+pub mod util;
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -25,96 +38,9 @@ pub struct Args {
     auto: bool,
 }
 
-#[inline]
-pub fn join<'a, S, T>(root: &'a S, iter: T) -> PathBuf
-where
-    S: 'a,
-    PathBuf: From<&'a S>,
-    T: IntoIterator,
-    <T as IntoIterator>::Item: AsRef<Path>,
-{
-    let mut buf = PathBuf::from(root);
-    buf.extend(iter);
-    return buf;
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Media {
-    id: u32,
-    filename: OsString,
-    created_at: SystemTime, // temp
-}
-
-impl PartialOrd for Media {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.id.partial_cmp(&other.id)
-    }
-}
-
-impl Ord for Media {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.id.cmp(&other.id)
-    }
-}
-
-pub fn get_media_ids(root: &str) -> Vec<Media> {
-    let re = regex!(r#"MVI_(\d{4})\.MOV"#);
-    let path = join(&root.to_string(), CONTENT_PATH);
-    let mut file_list = fs::read_dir(path).unwrap().filter_map(|r| {
-        let r = r.unwrap();
-        if r.file_type().unwrap().is_file() {
-            Some((r.file_name(), r.metadata().unwrap().created().unwrap()))
-        } else {
-            None
-        }
-    }).filter_map(|file_info| {
-        let filename = file_info.0.clone();
-        let caps = re.captures(filename.to_str().unwrap());
-        caps.map(|cap| {
-            Media {
-                id: cap.get(1).expect("filename does not follow hardcoded pattern. tough luck.").as_str().parse::<u32>().unwrap(),
-                filename: filename.clone(),
-                created_at: file_info.1,
-            }
-        })
-    }).collect::<Vec<_>>();
-
-    file_list.sort_unstable();
-    file_list
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, EnumString, EnumVariantNames)]
-#[strum(serialize_all = "kebab_case")]
-pub enum MapOpType {
-    Group,
-}
-
-impl Default for MapOpType {
-    fn default() -> Self {
-        Self::Group
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MapOp {
-    op_type: MapOpType,
-    name: String,
-    start: u32,
-    end: u32,
-}
-
-pub type MapOps = Vec<MapOp>;
-
-#[derive(Debug, Clone)]
-pub enum OpValidationResult {
-    Valid,
-    OverlappingRange(MapOp, MapOp),
-    Empty,
-}
-
 pub fn validate_ops(ops: &MapOps) -> OpValidationResult {
     use OpValidationResult::*;
-    
+
     if ops.len() == 0 {
         return Empty;
     }
@@ -126,7 +52,8 @@ pub fn validate_ops(ops: &MapOps) -> OpValidationResult {
             }
 
             if (op1.start > op2.start && op2.end > op1.start)
-            || (op1.start < op2.start && op1.end > op2.start) {
+                || (op1.start < op2.start && op1.end > op2.start)
+            {
                 return OverlappingRange(op1, op2);
             }
         }
@@ -144,7 +71,7 @@ pub fn input_loop() -> MapOps {
         if name.is_empty() {
             break;
         }
-        
+
         let op_type = {
             if MapOpType::VARIANTS.len() > 1 {
                 let type_name = rprompt::prompt_reply_stdout("Enter map operation: ").unwrap();
@@ -154,14 +81,20 @@ pub fn input_loop() -> MapOps {
             }
         };
 
-        let start = rprompt::prompt_reply_stdout("Enter start range (incl.): ").unwrap().parse::<u32>().unwrap();
-        let end = rprompt::prompt_reply_stdout("Enter end range (excl.): ").unwrap().parse::<u32>().unwrap();
+        let start = rprompt::prompt_reply_stdout("Enter start range (incl.): ")
+            .unwrap()
+            .parse::<u32>()
+            .unwrap();
+        let end = rprompt::prompt_reply_stdout("Enter end range (excl.): ")
+            .unwrap()
+            .parse::<u32>()
+            .unwrap();
 
         v.push(MapOp {
             end,
             name,
             op_type,
-            start
+            start,
         });
     }
 
@@ -171,57 +104,40 @@ pub fn input_loop() -> MapOps {
 pub fn group_by_day(media: &Vec<Media>) -> MapOps {
     let v = Vec::new();
 
-    let map = HashMap::<Date<Utc>, (u32, u32)>::new();
-    
+    let mut map = HashMap::<Date<Utc>, (u32, u32)>::new();
+
     for m in media {
-        let date: Date<Utc> = Utc.f.created_at.duration_since(UNIX_EPOCH).unwrap().as_millis();
-        match map.get_mut(&m.created_at.duration_since(UNIX_EPOCH).unwrap().as_millis().into()) {
+        let epoch = m.created_at.duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let date: Date<Utc> = Utc.timestamp(epoch.try_into().unwrap(), 0).date();
+        match map.get_mut(&date) {
             Some(mm) => {
-
-            },
-            None => {
-
-            }
-        }
-    }
-
-    v
-}
-
-#[derive(Error, Debug)]
-pub enum Errors {
-    InvalidRoot(String, PathBuf),
-    OutputDirectoryNotFound,
-    OutputDirectoryNotEmpty,
-    NoVideos,
-    ValidationError(OpValidationResult),
-}
-
-impl Display for Errors {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        use Errors::*;
-        match self {
-            InvalidRoot(root, path) => write!(f, "{:#?} is not a valid root ({:#?} does not exist).", root, path),
-            OutputDirectoryNotFound => write!(f, "The output directory does not exist!"),
-            OutputDirectoryNotEmpty => write!(f, "The output directory is not empty!"),
-            NoVideos => write!(f, "There are no compatible video files in the root folder!"),
-            ValidationError(res) => {
-                use OpValidationResult::*;
-                match res {
-                    OverlappingRange(op1, op2) => write!(f, "{} ({}..{}) overlaps {} ({}..{})", op1.name, op1.start, op1.end, op2.name, op2.start, op2.end),
-                    Empty => write!(f, "No operations defined! Exiting."),
-                    Valid => panic!()
+                if m.id < mm.0 {
+                    mm.0 = m.id;
+                }
+                if m.id >= mm.1 {
+                    mm.1 = m.id + 1;
                 }
             }
+            None => {
+                map.insert(date, (m.id, m.id + 1));
+            }
         }
     }
+
+    println!("{map:#?}");
+
+    v
 }
 
 fn main() -> Result<(), anyhow::Error> {
     env_logger::builder().format_timestamp(None).init();
 
     let args = Args::parse();
-    let root_path = join(&args.root, CONTENT_PATH);
+
+    let mapper = Mapper::try_new(args.root, args.out)?;
+    mapper.load_media()?;
+
+    let root_path = util::join(&args.root, CONTENT_PATH);
 
     debug!("Checking root directory");
     if root_path.to_string_lossy().is_empty() || !root_path.exists() {
@@ -245,7 +161,7 @@ fn main() -> Result<(), anyhow::Error> {
     debug!("Parsing filenames");
     let media = get_media_ids(&args.root);
     debug!("Parsed {} video files!", media.len());
-    
+
     if media.len() == 0 {
         return Err(Errors::NoVideos.into());
     }
@@ -255,7 +171,13 @@ fn main() -> Result<(), anyhow::Error> {
 
     debug!("Filename range: {} -> {}", start, end);
 
-    println!("\u{00BB} {} videos ({}..{})\n\u{00BB} Available ops: {}", media.len(), start, end, MapOpType::VARIANTS.join(", "));
+    println!(
+        "\u{00BB} {} videos ({}..{})\n\u{00BB} Available ops: {}",
+        media.len(),
+        start,
+        end,
+        MapOpType::VARIANTS.join(", ")
+    );
 
     let ops = {
         if args.auto {
@@ -270,8 +192,8 @@ fn main() -> Result<(), anyhow::Error> {
     debug!("Result: {:?}", valid);
 
     match &valid {
-        OpValidationResult::Valid => {},
-        _ => return Err(Errors::ValidationError(valid).into())
+        OpValidationResult::Valid => {}
+        _ => return Err(Errors::ValidationError(valid).into()),
     }
 
     println!("Processing all operations... (this will take a while)");
@@ -280,12 +202,12 @@ fn main() -> Result<(), anyhow::Error> {
         debug!("Processing ops: {}", op.name);
         match op.op_type {
             MapOpType::Group => {
-                let group_out = join(&out_path, [op.name]);
+                let group_out = util::join(&out_path, [op.name]);
                 fs::create_dir(&group_out).unwrap();
                 for m in media.clone() {
                     if m.id >= op.start && m.id < op.end {
-                        let from = join(&root_path, [&m.filename]);
-                        let to = join(&group_out, [&m.filename]);
+                        let from = util::join(&root_path, [&m.filename]);
+                        let to = util::join(&group_out, [&m.filename]);
                         fs::copy(from, to).unwrap();
                     }
                 }
