@@ -28,12 +28,12 @@ pub struct Mapper {
 #[derive(Debug, Clone, PartialEq, Eq, EnumString, EnumVariantNames)]
 #[strum(serialize_all = "kebab_case")]
 pub enum MapOpType {
-    Group,
+    Copy,
 }
 
 impl Default for MapOpType {
     fn default() -> Self {
-        Self::Group
+        Self::Copy
     }
 }
 
@@ -65,7 +65,7 @@ impl Ord for Media {
 }
 
 impl Mapper {
-    pub fn try_new(root: String, out: String) -> Result<Self> {
+    pub fn try_new(root: String, out: String, mkdir: bool) -> Result<Self> {
         let root_path = util::join(&root, CONTENT_PATH);
         if !root_path.exists() {
             return Err(Errors::InvalidRoot(root, root_path));
@@ -73,7 +73,11 @@ impl Mapper {
 
         let out_path = PathBuf::from(&out);
         if !out_path.exists() {
-            return Err(Errors::OutputDirectoryNotFound);
+            if mkdir {
+                fs::create_dir_all(&out_path).map_err(|e| Errors::IOError(e.kind()))?;
+            } else {
+                return Err(Errors::OutputDirectoryNotFound);
+            }
         } else {
             match fs::read_dir(&out_path) {
                 Ok(it) => {
@@ -274,7 +278,7 @@ impl Mapper {
     pub fn execute(&mut self) -> Result {
         for op in &self.ops {
             match op.op_type {
-                MapOpType::Group => {
+                MapOpType::Copy => {
                     let group_out = util::join(&self.out_path, [&op.name]);
                     fs::create_dir(&group_out).unwrap();
                     for m in self.media.clone() {

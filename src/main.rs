@@ -24,6 +24,10 @@ pub struct Args {
     /// Enable autogrouping
     #[clap(short, long, action, default_value_t = false)]
     auto: bool,
+
+    /// Make the output directory if it does not exist
+    #[clap(short, long, action, default_value_t = false)]
+    mkdir: bool,
 }
 
 fn main() -> Result<(), anyhow::Error> {
@@ -31,7 +35,7 @@ fn main() -> Result<(), anyhow::Error> {
 
     let args = Args::parse();
 
-    let mut mapper = Mapper::try_new(args.root, args.out)?;
+    let mut mapper = Mapper::try_new(args.root, args.out, args.mkdir)?;
     mapper.load_media()?;
 
     let (start, end) = mapper.get_range()?;
